@@ -12,23 +12,46 @@ def send_message():
     user_id = get_jwt_identity()
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
+    resume_context = data.get("resume_context")
     if not message:
-        return jsonify({"success": False, "message": "Message is required."}), 400
+        return jsonify(
+            {
+                "success": False,
+                "message": "Message is required.",
+            }
+        ), 400
+
     if len(message) > 2000:
-        return jsonify({"success": False, "message": "Message must be under 2000 characters."}), 400
+        return jsonify(
+            {
+                "success": False,
+                "message": "Message must be under 2000 characters.",
+            }
+        ), 400
 
     if not CareerAssistantService.is_enabled():
-        return jsonify({
-            "success": False,
-            "message": "AI assistant is not configured. Please set up GROQ_API_KEY.",
-        }), 503
+        return jsonify(
+            {
+                "success": False,
+                "message": (
+                    "AI assistant is not configured. "
+                    "Please set up GROQ_API_KEY."
+                ),
+            }
+        ), 503
 
     try:
-        result = CareerAssistantService.chat(user_id, message)
-        return jsonify({
-            "success": True,
-            "data": result,
-        }), 200
+        result = CareerAssistantService.chat(
+            user_id,
+            message,
+            resume_context,
+        )
+        return jsonify(
+            {
+                "success": True,
+                "data": result,
+            }
+        ), 200
     except CareerAssistantError as exc:
         current_app.logger.warning("Career assistant error: %s", exc)
         return jsonify({
@@ -44,10 +67,12 @@ def get_history():
     limit = request.args.get("limit", 50, type=int)
     limit = max(1, min(200, limit))
     history = CareerAssistantService.get_history(user_id, limit)
-    return jsonify({
-        "success": True,
-        "data": {"history": history},
-    }), 200
+    return jsonify(
+        {
+            "success": True,
+            "data": {"history": history},
+        }
+    ), 200
 
 
 @chat_bp.route("/clear", methods=["DELETE"])
@@ -55,8 +80,10 @@ def get_history():
 def clear_history():
     user_id = get_jwt_identity()
     success = CareerAssistantService.clear_history(user_id)
-    return jsonify({
-        "success": success,
-        "message": "Chat history cleared." if success else "Failed to clear history.",
-    }), 200 if success else 500
+    return jsonify(
+        {
+            "success": success,
+            "message": "Chat history cleared." if success else "Failed to clear history.",
+        }
+    ), 200 if success else 500
 

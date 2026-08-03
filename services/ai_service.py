@@ -132,7 +132,8 @@ class ResumeAIAnalysisService:
         max_tokens = current_app.config.get("GROQ_MAX_TOKENS", 2400)
 
         digest = cls._build_digest(
-            parsed_data, extracted_text,
+            parsed_data,
+            extracted_text,
             target_role=target_role,
             job_description=job_description,
         )

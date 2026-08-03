@@ -11,26 +11,33 @@ from models.chat import ChatHistory
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are PrepVerse AI, an expert career mentor for students and early-career professionals. "
-    "You specialise in: resume writing, ATS optimisation, interview preparation, "
-    "career planning, skill roadmaps, job search strategy, and professional development.\n\n"
+    "You are PrepVerse AI, an expert career mentor for students "
+    "and early-career professionals. "
+    "You specialise in: resume writing, ATS optimisation, "
+    "interview preparation, career planning, skill roadmaps, "
+    "job search strategy, and professional development.\n\n"
     "Behaviour rules:\n"
-    "- Answer ONLY on the topics above. Politely decline off-topic questions.\n"
+    "- Answer ONLY on the topics above. Politely decline "
+    "off-topic questions.\n"
     "- Keep responses concise (under 150 words) and actionable.\n"
-    "- When relevant, suggest 2-4 follow-up actions the user can take next.\n"
+    "- When relevant, suggest 2-4 follow-up actions the user can "
+    "take next.\n"
     "- Be encouraging but honest — give specific, practical advice.\n"
     "- NEVER generate fake credentials, degrees, or experience.\n\n"
-    "Return a JSON object. No markdown, no code fences, no extra text:\n"
+    "Return a JSON object. No markdown, no code fences, "
+    "no extra text:\n"
     "{\n"
-    '  "message": str (your response to the user),\n'
-    '  "actions": [str] (optional, 2-4 brief follow-up suggestions the user can ask about)\n'
+    "  \"message\": str (your response to the user),\n"
+    "  \"actions\": [str] (optional, 2-4 brief follow-up "
+    "suggestions the user can ask about)\n"
     "}\n"
-    "If you cannot help with the request, set message to a polite explanation and actions to []."
+    "If you cannot help with the request, set message to a polite "
+    "explanation and actions to []."
 )
-
 
 class CareerAssistantError(Exception):
     """Raised when the career assistant cannot produce a response."""
+
 
 
 class CareerAssistantService:
@@ -46,7 +53,7 @@ class CareerAssistantService:
             return False
 
     @classmethod
-    def chat(cls, user_id, user_message):
+    def chat(cls, user_id, user_message, resume_context=None):
         """Send a message to the assistant and return the response."""
         api_key = current_app.config.get("GROQ_API_KEY")
         if not api_key:
@@ -60,8 +67,8 @@ class CareerAssistantService:
         # Persist user message
         ChatHistory.create(user_id, "user", user_message)
 
-        # Build context from recent history
-        context_messages = cls._build_context(user_id)
+        # Build context from recent history and hidden resume context
+        context_messages = cls._build_context(user_id, resume_context)
 
         try:
             from openai import OpenAI
@@ -99,9 +106,27 @@ class CareerAssistantService:
         return result
 
     @classmethod
-    def _build_context(cls, user_id):
+    def _resume_context_text(cls, resume_context):
+        """Format hidden resume context for the assistant."""
+        return (
+            "Use this hidden resume context to inform your answer. "
+            "Do not mention that it was provided as hidden context.\n\n"
+            "Answer the user’s request using it and keep the response "
+            "concise and practical.\n\n"
+            "Resume context JSON:\n"
+            f"{json.dumps(resume_context, ensure_ascii=False)}"
+        )
+
+    @classmethod
+    def _build_context(cls, user_id, resume_context=None):
         """Build the message list for the API call."""
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if resume_context:
+            messages.append({
+                "role": "system",
+                "content": cls._resume_context_text(resume_context),
+            })
 
         try:
             recent = ChatHistory.find_recent_by_user(
@@ -133,7 +158,10 @@ class CareerAssistantService:
         """Ensure the response has the expected shape."""
         message = str(payload.get("message") or payload.get("response") or "")
         if not message:
-            message = "I'm not sure how to answer that. Could you rephrase your question?"
+            message = (
+                "I'm not sure how to answer that. "
+                "Could you rephrase your question?"
+            )
 
         actions = payload.get("actions") or payload.get("suggestions") or []
         if not isinstance(actions, list):

@@ -47,7 +47,7 @@ SYSTEM_PROMPT = (
     '  "missing_skills": [{"name": str, "reason": str}] (up to 6),\n'
     '  "recommended_skills": [{"name": str, "reason": str}] (up to 6),\n'
     '  "keyword_analysis": [{"name": str, "matched": int 0-100, "missing": int 0-100}] (up to 8),\n'
-    '  "sections": [{"name": str, "score": int 0-100, "strength": str, "recommendation": str}] (up to 7),\n'
+    '  "sections": [{"name": str, "score": int 0-100, "strength": str, "recommendation": str}] (up to 10),\n'
     '  "resume_strength": [{"name": str, "score": int 0-100, "recommendation": str}] (up to 5),\n'
     '  "suggestions": [{"priority": "high"|"medium"|"low", "title": str, "example": str, "estimated_ats_increase": int 0-20}] (up to 5)\n'
     "}\n"
@@ -56,8 +56,26 @@ SYSTEM_PROMPT = (
     "that role typically requires.\n"
     "- ats_breakdown must cover Contact, Skills, Experience, Projects, "
     "Education, and Keyword match.\n"
-    "- sections must reflect the resume's actual sections (Contact, Summary, "
-    "Skills, Projects, Experience, Education, Certifications, Languages).\n"
+    "- Section identification is SEMANTIC: the same section appears under many "
+    "heading names across resumes. Map the heading meaning to ONE canonical "
+    "name. Examples: 'Career Objective', 'Profile Summary', 'Professional "
+    "Summary', 'About Me', 'Executive Summary', 'Summary of Qualifications', "
+    "'Objective' -> Summary; 'Technical Skills', 'Key Skills', 'Skill Set', "
+    "'Core Competencies', 'Technologies & Tools', 'Tech Stack', 'Skills & "
+    "Abilities', 'Proficiencies' -> Skills; 'Work History', 'Employment "
+    "History', 'Professional Experience', 'Internships & Freelancing' -> "
+    "Experience; 'Academic Projects', 'Project Portfolio', 'Key Projects' -> "
+    "Projects; 'Courses', 'Certificates', 'Trainings' -> Certifications. "
+    "Also recognise: 'Hobbies & Interests', 'Extra-curricular Activities' -> "
+    "Interests; 'Awards & Achievements' -> Achievements; 'Volunteering & "
+    "Community Service' -> Volunteering; 'References available on request' -> "
+    "References; 'Declaration' -> Declaration.\n"
+    "- sections must report ONLY the sections actually present, using these "
+    "canonical names: Contact, Summary, Skills, Projects, Experience, "
+    "Education, Certifications, Languages, Achievements, Publications, "
+    "Volunteering, Interests, References, Declaration.\n"
+    "- Use the 'Detected headings' line to map the resume's exact written "
+    "headings to these canonical section names - never invent a section.\n"
     "- matched_skills = skills already present; missing_skills = skills absent "
     "but expected for the target role; recommended_skills = next best skills "
     "to add.\n"
@@ -86,10 +104,29 @@ _ARRAY_LIMITS = {
     "missing_skills": 6,
     "recommended_skills": 6,
     "keyword_analysis": 8,
-    "sections": 7,
+    "sections": 10,
     "resume_strength": 5,
     "suggestions": 5,
 }
+
+# Heading aliases used to surface how the resume is actually written so the
+# model can map them to canonical section names regardless of the format.
+HEADING_PATTERNS = [
+    ("Summary", re.compile(r"career\s+objective|professional\s+summary|profile\s+summary|executive\s+summary|summary\s+of\s+qualifications|about\s+me|personal\s+profile|objectives?|professional\s+profile", re.I)),
+    ("Skills", re.compile(r"technical\s+skills|key\s+skills|skill\s+set|core\s+competencies|technologies|tech\s+stack|tools\s+and\s+technologies|languages\s+and\s+technologies|skills\s+and\s+abilities|professional\s+skills|proficien", re.I)),
+    ("Experience", re.compile(r"work\s+experience|work\s+history|employment\s+history|professional\s+experience|internships?\s+and\s+freelancing|career\s+history|internship\s+experience|experience", re.I)),
+    ("Projects", re.compile(r"academic\s+projects|personal\s+projects|project\s+portfolio|key\s+projects|major\s+projects|project\s+details|internship\s+projects|projects", re.I)),
+    ("Education", re.compile(r"education|academic\s+background|academics|educational\s+qualifications|qualifications|education\s+history|academic\s+qualifications", re.I)),
+    ("Certifications", re.compile(r"certifications?|certificates|courses?\s+and\s+certifications|trainings?|licenses\s+and\s+certifications|workshops", re.I)),
+    ("Languages", re.compile(r"languages?\s+(known|spoken|proficiency|skills)?|linguistic\s+skills|language\s+proficiency", re.I)),
+    ("Achievements", re.compile(r"achievements?|accomplishments|awards|honors|recognitions", re.I)),
+    ("Publications", re.compile(r"publications?|research\s+papers|patents", re.I)),
+    ("Volunteering", re.compile(r"volunteer|community\s+service|social\s+work|ngo", re.I)),
+    ("Interests", re.compile(r"hobbies|interests?|extra.?curricular|co.?curricular|activities", re.I)),
+    ("Strengths", re.compile(r"strengths?|key\s+strengths", re.I)),
+    ("References", re.compile(r"references?|referees?", re.I)),
+    ("Declaration", re.compile(r"declaration", re.I)),
+]
 
 _cache_lock = threading.Lock()
 _cache = {}
@@ -181,7 +218,7 @@ class ResumeAIAnalysisService:
         # (e.g. on truncation) and skip the arrays. Synthesise the report
         # arrays from the parsed data so the dashboard never renders empty
         # cards. Model output is always preferred.
-        cls._backfill_from_parsed(parsed_data, result)
+        cls._backfill_from_parsed(parsed_data, result, extracted_text=extracted_text)
         cls._cache_set(cache_key, result)
         return result
 
@@ -210,6 +247,48 @@ class ResumeAIAnalysisService:
             if len(out) >= limit:
                 break
         return out
+
+    @classmethod
+    def _detect_section_headings(cls, text):
+        """Best-effort scan of heading wording actually used in the resume.
+
+        This is a hint for the model, not a parser: the AI still decides how
+        to interpret, name, and score each section. Capturing the exact
+        written headings ensures every resume format is surfaced.
+        """
+        if not text:
+            return []
+        found = []
+        seen = set()
+        for raw in text.splitlines():
+            line = re.sub(r"[:\-–—]+$", "", raw.strip()).strip()
+            if not line or len(line) > 48:
+                continue
+            if line.endswith((".", "…", "!", "?")):
+                continue
+            low = line.lower()
+            for canonical, pattern in HEADING_PATTERNS:
+                if pattern.search(low) and canonical not in seen:
+                    seen.add(canonical)
+                    found.append(f'{canonical} ("{line}")')
+                    break
+        return found
+
+    @staticmethod
+    def _has_summary(parsed, text):
+        """Return True when a summary/objective-like section is present."""
+        if parsed.get("summary"):
+            return True
+        if not text:
+            return False
+        head = text[:4000]
+        pattern = re.compile(
+            r"^\s*(career\s+objective|professional\s+summary|profile\s+summary|"
+            r"executive\s+summary|summary\s+of\s+qualifications|about\s+me|"
+            r"professional\s+objective|career\s+goal|objectives?|summary)\s*[:.\-–—]?",
+            re.I | re.M,
+        )
+        return bool(pattern.search(head))
 
     @classmethod
     def _build_digest(cls, parsed_data, extracted_text, target_role="", job_description=""):
@@ -262,6 +341,12 @@ class ResumeAIAnalysisService:
             if items:
                 lines.append(f"{section.upper()}: " + " | ".join(items))
 
+        # Surface the exact written headings so the model can map them to
+        # canonical section names regardless of resume format.
+        headings = cls._detect_section_headings(extracted_text or "")
+        if headings:
+            lines.append("DETECTED HEADINGS: " + " | ".join(headings))
+
         # Append job description if provided (capped to save budget).
         if job_description:
             jd_clean = cls._clean(job_description)
@@ -292,7 +377,7 @@ class ResumeAIAnalysisService:
         return {"digest": digest_text, "excerpt": excerpt}
 
     @classmethod
-    def _backfill_from_parsed(cls, parsed_data, result):
+    def _backfill_from_parsed(cls, parsed_data, result, extracted_text=""):
         """Fill empty report arrays from the deterministic parsed data.
 
         Llama-3.1-8b-instant occasionally returns only the numeric scores and
@@ -302,6 +387,7 @@ class ResumeAIAnalysisService:
         preferred; only completely empty arrays are backfilled.
         """
         parsed = parsed_data or {}
+        raw_text = extracted_text or ""
 
         # --- ats_breakdown -----------------------------------------------------
         if not result.get("ats_breakdown"):
@@ -348,6 +434,8 @@ class ResumeAIAnalysisService:
             rows = [
                 ("Contact", present("email") or present("phone"), 100, 55,
                  "Contact information present.", "Add both email and phone so recruiters can reach you."),
+                ("Summary", present("summary"), 80, 35,
+                 "Summary/objective section detected.", "Add a concise summary with your target role and top strengths."),
                 ("Skills", bool(parsed.get("skills")), 85, 35,
                  "Skills section detected.", "Expand the skills list with role-relevant technologies."),
                 ("Projects", bool(parsed.get("projects")), 80, 35,
@@ -360,6 +448,10 @@ class ResumeAIAnalysisService:
                  "Certifications detected.", "Add relevant certifications for the target role."),
                 ("Languages", bool(parsed.get("languages")), 70, 35,
                  "Languages detected.", "Add languages for multilingual roles."),
+                ("Achievements", bool(parsed.get("achievements")), 70, 35,
+                 "Achievements detected.", "Add measurable awards and recognitions."),
+                ("Interests", bool(parsed.get("interests")), 65, 35,
+                 "Interests detected.", "Add hobbies that reinforce personal brand."),
             ]
             sections = []
             for name, is_present, full_score, partial, strength, recommendation in rows:
@@ -383,6 +475,9 @@ class ResumeAIAnalysisService:
             if parsed.get("experience"):
                 strengths.append({"name": "Professional experience", "score": 75,
                                   "recommendation": "Quantify achievements with numbers."})
+            if parsed.get("summary"):
+                strengths.append({"name": "Summary/objective", "score": 75,
+                                  "recommendation": "Tighten summary with target role keywords."})
             if not strengths:
                 strengths.append({"name": "Foundation", "score": 60,
                                   "recommendation": "Add skills, projects, and experience to strengthen the resume."})
@@ -395,6 +490,10 @@ class ResumeAIAnalysisService:
                 suggestions.append({"priority": "high", "title": "Add contact details",
                                     "example": "Add an email and phone number at the top of the resume.",
                                     "estimated_ats_increase": 10})
+            if not cls._has_summary(parsed, raw_text):
+                suggestions.append({"priority": "high", "title": "Add a professional summary",
+                                    "example": "Write 2-3 lines summarising your target role, top skills, and impact.",
+                                    "estimated_ats_increase": 7})
             if not parsed.get("skills"):
                 suggestions.append({"priority": "high", "title": "Add a skills section",
                                     "example": "List 6-10 technologies relevant to your target role.",
